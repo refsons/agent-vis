@@ -25,8 +25,8 @@ const VERSION = '1.0.0';
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
 const CFG_DIR = process.env.AGENTSCOPE_HOME || path.join(HOME, '.agentscope');
-const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
-const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+let CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
+let PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 
 // ───────────────────────────── args & config ─────────────────────────────
 function parseArgs(argv) {
@@ -42,6 +42,7 @@ function parseArgs(argv) {
   return o;
 }
 const args = parseArgs(process.argv.slice(2));
+if (args['claude-dir']) { CLAUDE_DIR = path.resolve(String(args['claude-dir'])); PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects'); }
 const cmd = args._[0] || 'serve';
 
 function readJson(f, dflt) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return dflt; } }
@@ -116,7 +117,42 @@ function uninstall() {
 }
 if (cmd === 'install') { install(); process.exit(0); }
 if (cmd === 'uninstall') { uninstall(); process.exit(0); }
-if (cmd !== 'serve') { console.error('usage: agentscope.mjs [serve|install|uninstall] [options]'); process.exit(1); }
+if (cmd !== 'serve' && cmd !== 'sync') { console.error('usage: agentscope.mjs [serve|sync|install|uninstall] [options]'); process.exit(1); }
+
+// Mirror transcripts out of a sandbox so a dashboard on the host can read them.
+// Run inside the sandbox:  agentscope.mjs sync --to <shared dir> [--every 2] [--since 120] [--once]
+function syncOnce(to, sinceMin) {
+  const cutoff = Date.now() - sinceMin * 60000;
+  let copied = 0;
+  const walk = (src, dst) => {
+    let ents; try { ents = fs.readdirSync(src, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const sp = path.join(src, e.name), dp = path.join(dst, e.name);
+      if (e.isDirectory()) { walk(sp, dp); continue; }
+      if (!e.name.endsWith('.jsonl')) continue;
+      let st; try { st = fs.statSync(sp); } catch { continue; }
+      if (st.mtimeMs < cutoff) continue;
+      let have = 0; try { have = fs.statSync(dp).size; } catch {}
+      if (have === st.size) continue;
+      fs.mkdirSync(dst, { recursive: true });
+      const start = have < st.size ? have : 0;             // append new bytes; recopy if file shrank
+      const fd = fs.openSync(sp, 'r'), out = fs.openSync(dp, start ? 'a' : 'w');
+      const buf = Buffer.alloc(st.size - start);
+      const n = fs.readSync(fd, buf, 0, buf.length, start);
+      fs.writeSync(out, buf, 0, n); fs.closeSync(fd); fs.closeSync(out); copied++;
+    }
+  };
+  walk(PROJECTS_DIR, path.join(path.resolve(to), 'projects'));
+  return copied;
+}
+if (cmd === 'sync') {
+  if (!args.to) { console.error('usage: agentscope.mjs sync --to <dir> [--every 2] [--since 120] [--once]'); process.exit(1); }
+  const since = Number(args.since ?? 120), every = Number(args.every ?? 2);
+  console.log(`syncing ${PROJECTS_DIR} -> ${path.resolve(args.to)}/projects every ${every}s (files touched in last ${since} min)`);
+  syncOnce(args.to, since);
+  if (args.once) process.exit(0);
+  setInterval(() => { try { syncOnce(args.to, since); } catch (e) { console.error(e.message); } }, every * 1000);
+} else {
 
 // ───────────────────────────── state ─────────────────────────────
 const TOKEN = loadToken();
@@ -868,3 +904,4 @@ server.listen(cfg.port, '127.0.0.1', () => {
 server.on('error', (e) => { console.error(e.code === 'EADDRINUSE' ? `Port ${cfg.port} is in use. Try --port <n>.` : e.message); process.exit(1); });
 const shutdown = () => { for (const p of S.procs.values()) if (p.alive) p.child.kill('SIGTERM'); process.exit(0); };
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
+}
