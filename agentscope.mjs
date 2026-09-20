@@ -346,7 +346,7 @@ function getAgent(sess, e, ctx, ts) {
   let a = S.agents.get(key);
   if (a) return a;
   a = {
-    key, sid: sess.id, id, parent: null, label: id === 'main' ? 'main' : 'subagent', kind: id === 'main' ? 'main' : 'sub',
+    key, sid: sess.id, id, parent: null, label: id === 'main' ? 'main' : (metaLabel(ctx.file) || one(firstText(e), 48) || 'subagent'), kind: id === 'main' ? 'main' : 'sub', prompt: id === 'main' ? '' : firstText(e).slice(0, 400),
     status: 'running', started: ts, ended: null, tools: 0, inflight: 0, current: null, tokens: 0, tid: null,
   };
   if (id !== 'main') linkAgent(sess, a, e);
@@ -354,6 +354,18 @@ function getAgent(sess, e, ctx, ts) {
   markA(a);
   if (id !== 'main') emit({ sid: sess.id, aid: id, type: 'agent_start', ts, text: a.label, parent: a.parent });
   return a;
+}
+const taskLabel = (i = {}) => {
+  const nm = String(i.name || '').trim(), desc = String(i.description || '').trim(), type = i.subagent_type || 'agent';
+  return one(nm ? (desc ? `${nm}: ${desc}` : nm) : `${type}: ${desc || String(i.prompt || '').trim()}`, 90);
+};
+/** Newer CLIs write agent-<id>.meta.json next to a subagent transcript; use it when present. */
+function metaLabel(file) {
+  if (!file) return '';
+  try {
+    const m = JSON.parse(fs.readFileSync(file.replace(/\.jsonl$/, '.meta.json'), 'utf8'));
+    return taskLabel({ name: m.name, description: m.description, subagent_type: m.agentType || m.subagent_type });
+  } catch { return ''; }
 }
 function firstText(e) {
   const c = e.message?.content;
@@ -376,6 +388,15 @@ function linkAgent(sess, a, e) {
   }
   a.parent = t ? t.aid : 'main';
   if (t) a.label = t.label;
+}
+
+function applyTask(a, t) {
+  t.matched = true; a.tid = t.tid; a.parent = t.aid; a.label = t.label; markA(a);
+}
+/** A subagent transcript can be read before the Task call that spawned it (mirrored or backfilled files). */
+function relinkPending(sess, t) {
+  if (!t.prompt) return;
+  for (const a of S.agents.values()) if (a.sid === sess.id && a.kind === 'sub' && !a.tid && a.prompt === t.prompt) { applyTask(a, t); return; }
 }
 
 function addUsage(sess, ag, msg) {
@@ -491,7 +512,8 @@ function onToolUse(sess, ag, b, ts) {
   markA(ag);
   if (isTask(b.name)) {
     const q = S.taskQueue.get(sess.id) || [];
-    q.push({ tid: b.id, aid: ag.id, prompt: String(input.prompt || '').trim().slice(0, 400), label: one(`${input.subagent_type || 'agent'}: ${input.description || ''}`, 90), matched: false });
+    q.push({ tid: b.id, aid: ag.id, prompt: String(input.prompt || '').trim().slice(0, 400), label: taskLabel(input), matched: false });
+    relinkPending(sess, q[q.length - 1]);
     if (q.length > 50) q.shift();
     S.taskQueue.set(sess.id, q);
   }
@@ -525,6 +547,7 @@ function endSubagent(sess, tid, result, ts, ok) {
   let a = [...S.agents.values()].find((x) => x.sid === sess.id && x.tid === tid);
   if (!a && result?.agentId) a = S.agents.get(`${sess.id}/a:${result.agentId}`);
   if (!a) return;
+  if (!a.tid) { const t = (S.taskQueue.get(sess.id) || []).find((x) => x.tid === tid); if (t) applyTask(a, t); }
   a.status = ok ? 'done' : 'failed';
   a.ended = ts; a.current = null; a.inflight = 0;
   if (result?.totalTokens) a.tokens = Math.max(a.tokens, result.totalTokens);
