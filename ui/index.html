@@ -631,6 +631,7 @@ const dlg = $('#newDlg');
 $('#newBtn').onclick = () => {
   const last = [...st.sessions.values()].sort((a, b) => b.last - a.last)[0];
   if (!$('#nCwd').value && last?.cwd) $('#nCwd').value = last.cwd;
+  if (st.caps.remote) { $('#nCwd').required = false; $('#nCwd').placeholder = 'Directory inside the sandbox (blank = the agent\'s directory)'; if (!st.caps.agentAlive) toast('Sandbox agent is not running. Start it inside the sandbox: node agentscope.mjs agent --dir <shared dir>'); }
   if (st.caps.allowBypass && !$('#nMode option[value=bypassPermissions]')) $('#nMode').insertAdjacentHTML('beforeend', '<option value="bypassPermissions">Bypass all permissions (dangerous)</option>');
   dlg.showModal(); $('#nPrompt').focus();
 };

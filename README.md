@@ -44,6 +44,30 @@ notifications fire if the tab is in the background. Approving and
 replying still happen in the sandbox terminal, because sessions started from a host dashboard
 run `claude` on the host, not in the sandbox. Add `.agentscope-sync/` to your `.gitignore`.
 
+### Full control of sandbox sessions (agent mode)
+
+To start sessions from the dashboard and get real Allow and Deny buttons while Claude runs inside the
+sandbox, run the agent there instead of `sync` (it does the same mirroring as well):
+
+```bash
+# inside the sandbox
+node agentscope.mjs agent --dir <workspace>/.agentscope-sync --cwd <project dir in the sandbox>
+
+# on the host
+node agentscope.mjs serve --remote <host path to the same directory> --open
+```
+
+"New session" then runs `claude -p` inside the sandbox through the shared directory. Approvals use
+the no-MCP flow (Blocked cards, Allow and retry), so nothing needs hooks or MCP. A blank working
+directory, or one that does not exist in the sandbox, uses the agent's `--cwd`. The dashboard shows an
+error if the agent is not running (it writes a heartbeat every 0.4s).
+
+The shared directory is a command channel: anything that can write to it can ask the agent to start
+`claude`. The agent runs no shell, only the fixed `claude` binary, and rejects any flag outside
+`-p`, `--input-format`, `--output-format`, `--verbose`, `--resume`, `--session-id`, `--model`,
+`--permission-mode` and `--allowedTools`. `bypassPermissions` needs `agent --allow-bypass`.
+Sessions you start in your own terminal keep working as before, with the read-only alerts.
+
 ## What you get
 
 | Area | What it shows / does |
@@ -92,7 +116,9 @@ This is the route that needs no hooks. Approvals arrive one of two ways:
 ## Options
 
 `serve --port 7788 --since 30 --claude /path/to/claude --claude-dir <dir> --no-mcp --allow-bypass --open`
-`sync --to <dir> --every 2 --since 120 --once`
+`sync --to <dir> --every 2 --since 120 --once`\
+`agent --dir <dir> --claude claude --cwd <dir> --allow-bypass`\
+`serve --remote <dir>`
 `install --gate permission|pretool|off --perm-wait 45 --reply-window 0 --scope user|project`
 
 `--gate pretool` gates only Bash/Edit/Write/NotebookEdit through PreToolUse, for Claude Code

@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +43,7 @@ function parseArgs(argv) {
   return o;
 }
 const args = parseArgs(process.argv.slice(2));
+if (args.remote && !args['claude-dir']) args['claude-dir'] = args.remote;   // remote dir also carries the mirrored transcripts
 if (args['claude-dir']) { CLAUDE_DIR = path.resolve(String(args['claude-dir'])); PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects'); }
 const cmd = args._[0] || 'serve';
 
@@ -64,7 +66,8 @@ const cfg = {
   sinceMin: Number(args.since ?? saved.sinceMin ?? 30),              // transcript backfill window
   claudeBin: args.claude || process.env.AGENTSCOPE_CLAUDE || 'claude',
   allowBypass: !!args['allow-bypass'],
-  noMcp: !!(args['no-mcp'] || saved.noMcp),                          // sandboxes where MCP and hooks are disabled
+  remote: args.remote ? path.resolve(String(args.remote)) : null,      // shared dir to a sandbox-side `agent`
+  noMcp: !!(args['no-mcp'] || saved.noMcp || args.remote),                          // sandboxes where MCP and hooks are disabled
 };
 
 // ───────────────────────────── install / uninstall ─────────────────────────────
@@ -117,7 +120,7 @@ function uninstall() {
 }
 if (cmd === 'install') { install(); process.exit(0); }
 if (cmd === 'uninstall') { uninstall(); process.exit(0); }
-if (cmd !== 'serve' && cmd !== 'sync') { console.error('usage: agentscope.mjs [serve|sync|install|uninstall] [options]'); process.exit(1); }
+if (cmd !== 'serve' && cmd !== 'sync' && cmd !== 'agent') { console.error('usage: agentscope.mjs [serve|agent|sync|install|uninstall] [options]'); process.exit(1); }
 
 // Mirror transcripts out of a sandbox so a dashboard on the host can read them.
 // Run inside the sandbox:  agentscope.mjs sync --to <shared dir> [--every 2] [--since 120] [--once]
@@ -152,6 +155,52 @@ if (cmd === 'sync') {
   syncOnce(args.to, since);
   if (args.once) process.exit(0);
   setInterval(() => { try { syncOnce(args.to, since); } catch (e) { console.error(e.message); } }, every * 1000);
+} else if (cmd === 'agent') {
+  // Runs INSIDE the sandbox. Mirrors transcripts to <dir>/projects and runs `claude -p` for the host dashboard.
+  if (!args.dir) { console.error('usage: agentscope.mjs agent --dir <shared dir> [--claude claude] [--cwd <default dir>] [--every 2] [--since 120] [--allow-bypass]'); process.exit(1); }
+  const R = path.resolve(String(args.dir));
+  const since = Number(args.since ?? 120), every = Number(args.every ?? 2);
+  const bin = args.claude || process.env.AGENTSCOPE_CLAUDE || 'claude';
+  const defCwd = path.resolve(String(args.cwd || process.cwd()));
+  const allowBypass = !!args['allow-bypass'];
+  const FLAGS = new Set(['-p', '--input-format', '--output-format', '--verbose', '--resume', '--session-id', '--model', '--permission-mode', '--allowedTools']);
+  const okArgs = (a) => Array.isArray(a) && a.every((x) => typeof x === 'string' && x.length < 400) && a.every((x, i) => !x.startsWith('-') || FLAGS.has(x))
+    && (allowBypass || !a.includes('bypassPermissions'));
+  fs.mkdirSync(path.join(R, 'cmd'), { recursive: true }); fs.mkdirSync(path.join(R, 'out'), { recursive: true });
+  const procs = new Map();
+  const app = (p, d) => fs.appendFileSync(p, d);
+  const handle = (c) => {
+    if (c.type === 'spawn') {
+      if (!okArgs(c.args)) { fs.writeFileSync(path.join(R, 'out', `${c.procId}.err`), 'agent refused: unexpected arguments\n'); fs.writeFileSync(path.join(R, 'out', `${c.procId}.exit`), JSON.stringify({ code: 2 })); return; }
+      const cwd = c.cwd && fs.existsSync(c.cwd) && fs.statSync(c.cwd).isDirectory() ? c.cwd : defCwd;
+      const outF = path.join(R, 'out', `${c.procId}.out`), errF = path.join(R, 'out', `${c.procId}.err`);
+      for (const f of [outF, errF, path.join(R, 'out', `${c.procId}.exit`)]) try { fs.unlinkSync(f); } catch {}
+      fs.writeFileSync(outF, ''); fs.writeFileSync(errF, '');
+      const child = spawn(bin, c.args, { cwd, env: { ...process.env, AGENTSCOPE_MANAGED: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+      procs.set(c.procId, child);
+      child.stdout.on('data', (d) => app(outF, d));
+      child.stderr.on('data', (d) => app(errF, d));
+      child.on('error', (e) => { app(errF, (e.code === 'ENOENT' ? `Cannot start '${bin}' in the sandbox. Pass --claude /path/to/claude.` : e.message) + '\n'); fs.writeFileSync(path.join(R, 'out', `${c.procId}.exit`), JSON.stringify({ code: 127 })); procs.delete(c.procId); });
+      child.on('close', (code) => { fs.writeFileSync(path.join(R, 'out', `${c.procId}.exit`), JSON.stringify({ code })); procs.delete(c.procId); });
+      console.log(`start ${c.procId.slice(0, 8)} in ${cwd}${cwd !== c.cwd && c.cwd ? ` (requested ${c.cwd} not found here)` : ''}`);
+    } else if (c.type === 'stdin') { const ch = procs.get(c.procId); if (ch && !ch.stdin.destroyed) ch.stdin.write(c.data); }
+    else if (c.type === 'kill') { const ch = procs.get(c.procId); if (ch) ch.kill('SIGTERM'); }
+  };
+  const tick = () => {
+    fs.writeFileSync(path.join(R, 'agent.json'), JSON.stringify({ ts: Date.now(), pid: process.pid, cwd: defCwd, claude: bin, procs: procs.size }));
+    let names = []; try { names = fs.readdirSync(path.join(R, 'cmd')).filter((n) => n.endsWith('.json')).sort(); } catch {}
+    for (const n of names) {
+      const f = path.join(R, 'cmd', n);
+      try { handle(JSON.parse(fs.readFileSync(f, 'utf8'))); } catch (e) { console.error('bad command', n, e.message); }
+      try { fs.unlinkSync(f); } catch {}
+    }
+  };
+  console.log(`agent: shared dir ${R}\n  claude     ${bin}\n  default cwd ${defCwd}\n  mirroring  ${PROJECTS_DIR} every ${every}s`);
+  tick(); syncOnce(R, since);
+  setInterval(() => { try { tick(); } catch (e) { console.error(e.message); } }, 400);
+  setInterval(() => { try { syncOnce(R, since); } catch (e) { console.error(e.message); } }, every * 1000);
+  const stop = () => { for (const c of procs.values()) c.kill('SIGTERM'); try { fs.unlinkSync(path.join(R, 'agent.json')); } catch {} process.exit(0); };
+  process.on('SIGINT', stop); process.on('SIGTERM', stop);
 } else {
 
 // ───────────────────────────── state ─────────────────────────────
@@ -750,9 +799,62 @@ async function onHook(ev, p, cancelOn) {
 const PERM_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
 function httpErr(status, message) { return Object.assign(new Error(message), { status }); }
 
+
+// ───────────────────────────── remote (sandbox) transport ─────────────────────────────
+// Host side of the shared-directory channel to `agentscope.mjs agent` running inside a sandbox:
+//   <dir>/cmd/*.json       host -> agent   spawn | stdin | kill
+//   <dir>/out/<proc>.out   agent -> host   raw stream-json stdout of claude
+//   <dir>/out/<proc>.err / .exit           stderr tail, and {code} when claude has exited
+//   <dir>/agent.json       agent heartbeat
+function agentAlive() {
+  try { const hb = JSON.parse(fs.readFileSync(path.join(cfg.remote, 'agent.json'), 'utf8')); return Date.now() - hb.ts < 15000; } catch { return false; }
+}
+let cmdSeq = 0;
+function putCmd(dir, procId, type, body) {
+  fs.mkdirSync(path.join(dir, 'cmd'), { recursive: true });
+  const name = `${String(Date.now()).padStart(14, '0')}-${String(cmdSeq++).padStart(6, '0')}-${procId}`;
+  const tmp = path.join(dir, 'cmd', name + '.tmp');
+  fs.writeFileSync(tmp, JSON.stringify({ procId, type, ...body }));
+  fs.renameSync(tmp, path.join(dir, 'cmd', name + '.json'));
+}
+function remoteSpawn(procId, cwd, cliArgs) {
+  const dir = cfg.remote;
+  fs.mkdirSync(path.join(dir, 'out'), { recursive: true });
+  const child = new EventEmitter();
+  child.stdout = Object.assign(new EventEmitter(), { setEncoding() {} });
+  child.stderr = Object.assign(new EventEmitter(), { setEncoding() {} });
+  child.stdin = { write: (data) => putCmd(dir, procId, 'stdin', { data: String(data) }) };
+  child.kill = () => putCmd(dir, procId, 'kill', {});
+  const files = { out: { off: 0, dec: new StringDecoder('utf8'), stream: child.stdout }, err: { off: 0, dec: new StringDecoder('utf8'), stream: child.stderr } };
+  const drain = () => {
+    for (const [ext, f] of Object.entries(files)) {
+      const file = path.join(dir, 'out', `${procId}.${ext}`);
+      let st; try { st = fs.statSync(file); } catch { continue; }
+      if (st.size <= f.off) continue;
+      const fd = fs.openSync(file, 'r'), buf = Buffer.alloc(st.size - f.off);
+      const n = fs.readSync(fd, buf, 0, buf.length, f.off); fs.closeSync(fd);
+      f.off += n;
+      const text = f.dec.write(buf.subarray(0, n));
+      if (text) f.stream.emit('data', text);
+    }
+  };
+  const timer = setInterval(() => {
+    drain();
+    const exitFile = path.join(dir, 'out', `${procId}.exit`);
+    if (!fs.existsSync(exitFile)) return;
+    drain();
+    let code = 0; try { code = JSON.parse(fs.readFileSync(exitFile, 'utf8')).code ?? 0; } catch {}
+    clearInterval(timer);
+    child.emit('close', code);
+  }, 300);
+  putCmd(dir, procId, 'spawn', { cwd, args: cliArgs });
+  return child;
+}
+
 function startManaged({ cwd, prompt, model, permissionMode, resume, allow }) {
-  const dir = path.resolve(String(cwd || process.cwd()).replace(/^~(?=$|[\\/])/, HOME));
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw httpErr(400, `Working directory not found: ${dir}`);
+  const dir = cfg.remote ? String(cwd || '').trim() : path.resolve(String(cwd || process.cwd()).replace(/^~(?=$|[\\/])/, HOME));
+  if (cfg.remote) { if (!agentAlive()) throw httpErr(503, 'The sandbox agent is not running. Inside the sandbox run: node agentscope.mjs agent --dir ' + cfg.remote); }
+  else if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) throw httpErr(400, `Working directory not found: ${dir}`);
   const mode = permissionMode || 'default';
   if (!PERM_MODES.includes(mode)) throw httpErr(400, 'Unknown permission mode');
   if (mode === 'bypassPermissions' && !cfg.allowBypass) throw httpErr(403, 'bypassPermissions is disabled. Start the server with --allow-bypass to enable it.');
@@ -782,7 +884,7 @@ function startManaged({ cwd, prompt, model, permissionMode, resume, allow }) {
   const proc = { id: procId, sid, alive: true, child: null, mcpFile };
   S.procs.set(procId, proc);
 
-  const child = spawn(cfg.claudeBin, cliArgs, { cwd: dir, env: { ...process.env, AGENTSCOPE_MANAGED: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = cfg.remote ? remoteSpawn(procId, dir, cliArgs) : spawn(cfg.claudeBin, cliArgs, { cwd: dir, env: { ...process.env, AGENTSCOPE_MANAGED: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
   proc.child = child;
   let buf = '', errBuf = '';
   child.stdout.setEncoding('utf8');
@@ -869,7 +971,7 @@ function snapshot() {
   const todos = {};
   for (const [k, v] of S.todos) todos[k] = v;
   return {
-    now: now(), caps: { version: VERSION, allowBypass: cfg.allowBypass, noMcp: cfg.noMcp, permWait: cfg.permWait, replyWindow: cfg.replyWindow },
+    now: now(), caps: { version: VERSION, allowBypass: cfg.allowBypass, noMcp: cfg.noMcp, remote: !!cfg.remote, agentAlive: cfg.remote ? agentAlive() : null, permWait: cfg.permWait, replyWindow: cfg.replyWindow },
     sessions: [...S.sessions.values()].map(pubSession), agents: [...S.agents.values()].map(pubAgent), todos,
     pending: [...S.prompts.values()].map((e) => pubPrompt(e.prompt)), events: S.events.slice(-1500),
   };
