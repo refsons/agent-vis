@@ -36,7 +36,11 @@ node agentscope.mjs serve --claude-dir /host/path/to/workspace/.agentscope-sync 
 ```
 
 `sync` only appends new bytes, never modifies the originals, and `--once` copies a single time.
-This gives the full read-only view (timeline, lanes, agent tree, tasks, tokens). Approving and
+This gives the full read-only view (timeline, lanes, agent tree, tasks, tokens). **Needs you** shows
+read-only alerts here: an `AskUserQuestion` appears within a second, and any other tool call still
+unanswered after 6 seconds appears as "Waiting: <tool>" (it is probably an approval prompt, but a slow
+command looks identical). The card clears itself when you answer in the terminal, and browser
+notifications fire if the tab is in the background. Approving and
 replying still happen in the sandbox terminal, because sessions started from a host dashboard
 run `claude` on the host, not in the sandbox. Add `.agentscope-sync/` to your `.gitignore`.
 

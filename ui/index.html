@@ -506,6 +506,12 @@ function renderInbox() {
   inbox.innerHTML = list.map((p, idx) => {
     const s = st.sessions.get(p.sid);
     const head = `<div class="h"><b>${p.kind === 'question' ? 'Question from Claude' : 'Allow ' + esc(p.tool) + '?'}</b><span class="sub">${esc(s ? (s.title || base(s.cwd)).slice(0, 26) : '')}</span></div>`;
+    if (p.kind === 'waiting') {
+      const isQ = p.tool === 'AskUserQuestion';
+      const body = isQ ? (p.input?.questions || []).map((q) => `<div class="perm"><b>${esc(q.question)}</b><span class="s">${(q.options || []).map((o) => esc(o.label)).join(' · ')}</span></div>`).join('') : permBody(p);
+      const ag = p.aid && p.aid !== 'main' ? ` · ${esc(String(p.agent || p.aid).slice(0, 24))}` : '';
+      return `<div class="card" data-id="${p.id}"><div class="h"><b>${isQ ? 'Claude is asking you' : 'Waiting: ' + esc(p.tool)}</b><span class="sub">${esc(s ? (s.title || base(s.cwd)).slice(0, 26) : '')}${ag}</span></div>${body}<div class="sub">${isQ ? 'Answer in the terminal.' : 'Probably waiting for approval in the terminal, or a slow command.'} <span data-since="${p.created}"></span></div><div class="btns"><button data-act="dismiss">Dismiss</button></div></div>`;
+    }
     if (p.kind === 'denial') {
       const first = p.tool === 'Bash' ? String(p.input?.command || '').trim().split(/\s+/)[0] : '';
       return `<div class="card" data-id="${p.id}">${head.replace('Allow ' + esc(p.tool) + '?', 'Blocked: ' + esc(p.tool))}${permBody(p)}<div class="sub">This needed approval, so Claude was stopped. Allowing restarts the session with the permission and asks Claude to retry.</div><div class="btns"><button class="warn" data-act="allow">Allow and retry</button>${first ? `<button data-act="allow-prefix" title="Adds Bash(${esc(first)}:*) for this session">Allow all ${esc(first)} commands</button>` : ''}<button class="danger" data-act="deny">Dismiss</button></div></div>`;
@@ -517,6 +523,7 @@ function renderInbox() {
   tickCountdown();
 }
 function tickCountdown() {
+  document.querySelectorAll('[data-since]').forEach((n) => { const s = Math.max(0, Math.round((Date.now() - +n.dataset.since) / 1000)); n.textContent = `Waiting ${s >= 60 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : s + 's'}.`; });
   document.querySelectorAll('[data-exp]').forEach((n) => { const s = Math.round((+n.dataset.exp - Date.now()) / 1000); n.textContent = s > 0 ? `The terminal prompt takes over in ${s}s if you do not answer.` : 'The terminal prompt has taken over.'; });
 }
 async function decide(id, decision, extra = {}) {
@@ -528,6 +535,7 @@ inbox.addEventListener('click', (e) => {
   if (act === 'allow') decide(id, 'allow');
   else if (act === 'allow-prefix') decide(id, 'allow', { scope: 'prefix' });
   else if (act === 'allow-session') decide(id, 'allow', { remember: true });
+  else if (act === 'dismiss') decide(id, 'deny');
   else if (act === 'deny') decide(id, 'deny', { message: card.querySelector('[data-reason]')?.value || undefined });
   else if (act === 'answer') {
     const answers = {};
@@ -721,7 +729,7 @@ document.querySelectorAll('#tabbar button').forEach((b) => (b.onclick = () => { 
 $('#bell').onclick = async () => { const p = await Notification.requestPermission(); $('#bell').hidden = p === 'granted'; };
 if (!('Notification' in window) || Notification.permission === 'granted') $('#bell').hidden = true;
 function alertNew(p) {
-  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') new Notification(p.kind === 'question' ? 'Claude has a question' : `Approve ${p.tool}?`, { body: p.summary, tag: p.id });
+  if (document.hidden && 'Notification' in window && Notification.permission === 'granted') new Notification(p.kind === 'question' || p.tool === 'AskUserQuestion' ? 'Claude has a question' : p.kind === 'waiting' ? `Waiting on ${p.tool}` : `Approve ${p.tool}?`, { body: p.summary, tag: p.id });
 }
 
 /* ───────── render scheduler ───────── */

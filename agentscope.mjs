@@ -254,7 +254,7 @@ const pubAgent = (a) => ({
 });
 const pubPrompt = (p) => ({
   id: p.id, kind: p.kind, sid: p.sid, tool: p.tool, summary: p.summary, input: p.input,
-  created: p.created, expires: p.expires, source: p.source,
+  created: p.created, expires: p.expires, source: p.source, aid: p.aid, agent: p.agent,
 });
 setInterval(() => {
   for (const s of S.sessions.values()) if (s.status !== deriveStatus(s)) markS(s);
@@ -438,6 +438,7 @@ function onToolUse(sess, ag, b, ts) {
     S.taskQueue.set(sess.id, q);
   }
   emit({ sid: sess.id, aid: ag.id, type: 'tool_use', ts, tid: b.id, tool: b.name, summary, input: clip(input) });
+  watchForWait(sess, ag, b, ts);
   if (b.name === 'TodoWrite' && Array.isArray(input.todos)) {
     const todos = input.todos.map((t) => ({ content: one(t.content, 200), status: t.status, activeForm: one(t.activeForm, 200) }));
     S.todos.set(ag.key, todos);
@@ -453,6 +454,7 @@ function onToolResult(sess, ag, b, e, ts) {
     sid: sess.id, aid, type: 'tool_result', ts, tid: b.tool_use_id, tool: t?.name, ok: !b.is_error,
     ms: t ? ts - t.start : null, output: clipStr(resultText(b.content), 4000),
   });
+  clearWaiting(b.tool_use_id);
   if (!t) return;
   const a = S.agents.get(`${sess.id}/${t.aid}`);
   if (a) { a.inflight = Math.max(0, a.inflight - 1); if (!a.inflight) a.current = null; markA(a); }
@@ -571,6 +573,7 @@ function resolvePrompt(id, body) {
   const entry = S.prompts.get(id);
   if (!entry) throw httpErr(404, 'prompt already resolved or expired');
   const p = entry.prompt;
+  if (p.kind === 'waiting') { entry.finish({ decision: 'none' }, 'dismissed'); return { ok: true }; }
   const allow = body.decision === 'allow';
   if (p.kind === 'denial') {
     const s = S.sessions.get(p.sid);
@@ -589,6 +592,39 @@ function resolvePrompt(id, body) {
   if (allow && body.remember) { const s = S.sessions.get(p.sid); if (s) s.allow.add(p.key); }
   entry.finish(r, 'dashboard');
   return { ok: true };
+}
+
+
+/** Sessions running in your own terminal with no hooks: the dashboard can only observe. A tool call that is
+ *  still unanswered after a short grace period is probably sitting on an approval prompt (or is a slow command),
+ *  and an AskUserQuestion is always waiting on you. Both become read-only "waiting" cards; answer in the terminal. */
+const NO_PROMPT = new Set(['Task', 'Agent', 'TodoWrite', 'Read', 'Glob', 'Grep', 'LS', 'NotebookRead']);
+function watchForWait(sess, ag, b, ts) {
+  if (sess.managed || sess.hooked || NO_PROMPT.has(b.name)) return;
+  if (now() - ts > 180000) return;                       // history being replayed, not live
+  const question = b.name === 'AskUserQuestion';
+  setTimeout(() => {
+    if (!S.tools.has(b.id) || [...S.prompts.values()].some((e) => e.prompt.tid === b.id)) return;
+    const input = b.input || {};
+    const id = crypto.randomUUID();
+    const prompt = { id, kind: 'waiting', sid: sess.id, aid: ag.id, agent: ag.label || ag.id, tool: b.name, summary: summarize(b.name, input), input: clip(input, 6000), created: ts, expires: null, source: 'transcript', tid: b.id };
+    const entry = { prompt, done: false };
+    entry.finish = (r, by) => {
+      if (entry.done) return;
+      entry.done = true;
+      S.prompts.delete(id);
+      broadcast('pending_remove', { id });
+      emit({ sid: sess.id, aid: ag.id, type: 'permission_resolved', pid: id, decision: 'none', by: by || 'terminal' });
+      markS(sess);
+    };
+    S.prompts.set(id, entry);
+    emit({ sid: sess.id, aid: ag.id, type: 'permission', pid: id, tool: b.name, summary: prompt.summary, input: prompt.input, kind: 'waiting' });
+    broadcast('pending', pubPrompt(prompt));
+    markS(sess);
+  }, question ? 800 : 6000);
+}
+function clearWaiting(tid) {
+  for (const e of [...S.prompts.values()]) if (e.prompt.kind === 'waiting' && e.prompt.tid === tid) e.finish(null, 'answered in the terminal');
 }
 
 /** No-MCP mode: a tool call blocked by `claude -p` becomes an "Allow and retry" card. */
