@@ -115,7 +115,7 @@ This is the route that needs no hooks. Approvals arrive one of two ways:
 
 ## Options
 
-`serve --port 7788 --since 30 --claude /path/to/claude --claude-dir <dir> --no-mcp --allow-bypass --open`
+`serve --port 7788 --since 30 --end-after 10 --claude /path/to/claude --claude-dir <dir> --no-mcp --allow-bypass --open`
 `sync --to <dir> --every 2 --since 120 --once`\
 `agent --dir <dir> --claude claude --cwd <dir> --allow-bypass`\
 `serve --remote <dir>`
@@ -123,6 +123,11 @@ This is the route that needs no hooks. Approvals arrive one of two ways:
 
 `--gate pretool` gates only Bash/Edit/Write/NotebookEdit through PreToolUse, for Claude Code
 versions without the PermissionRequest hook.
+
+Without hooks nothing announces that a terminal session has closed, so a session counts as **ended**
+(and is hidden by "Hide ended") after `--end-after` minutes of silence (default 10), or once a newer
+session starts in the same directory, which is what a Claude restart looks like. It flips back
+automatically if the old session becomes active again.
 
 ## Security model
 

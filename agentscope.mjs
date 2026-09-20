@@ -63,6 +63,7 @@ const cfg = {
   port: Number(args.port ?? process.env.AGENTSCOPE_PORT ?? saved.port ?? 7788),
   permWait: Number(args['perm-wait'] ?? saved.permWait ?? 45),        // seconds a hook holds a permission request
   replyWindow: Number(args['reply-window'] ?? saved.replyWindow ?? 0), // seconds the Stop hook waits for a reply
+  endAfterMin: Number(args['end-after'] ?? saved.endAfterMin ?? 10),     // idle minutes before an observed session counts as ended
   sinceMin: Number(args.since ?? saved.sinceMin ?? 30),              // transcript backfill window
   claudeBin: args.claude || process.env.AGENTSCOPE_CLAUDE || 'claude',
   allowBypass: !!args['allow-bypass'],
@@ -284,6 +285,14 @@ function deriveStatus(s) {
   for (const p of S.prompts.values()) if (p.prompt.sid === s.id) return 'waiting';
   if (s.inflight > 0 && now() - s.last < 600000) return 'working';
   if (s.turnOpen && now() - s.last < 45000) return 'working';
+  // Without hooks nothing announces that a terminal session closed, so infer it from the transcript:
+  // long silence, or a newer session in the same directory (claude was restarted).
+  const proc = s.proc && S.procs.get(s.proc);
+  if (!(proc && proc.alive)) {
+    const idle = now() - s.last;
+    if (idle > cfg.endAfterMin * 60000) return 'ended';
+    if (idle > 45000 && s.cwd) for (const o of S.sessions.values()) if (o !== s && o.cwd === s.cwd && o.started >= s.last) return 'ended';
+  }
   return 'idle';
 }
 function pubSession(s) {
