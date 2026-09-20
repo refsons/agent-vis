@@ -1065,7 +1065,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(cfg.port, '127.0.0.1', () => {
   const url = `http://127.0.0.1:${cfg.port}/?t=${TOKEN}`;
-  console.log(`AgentScope ${VERSION}\n  dashboard  ${url}\n  watching   ${PROJECTS_DIR} (last ${cfg.sinceMin} min)\n  hooks      perm-wait=${cfg.permWait}s reply-window=${cfg.replyWindow}s`);
+  console.log(`AgentScope ${VERSION}\n  dashboard  ${url}\n  watching   ${PROJECTS_DIR} (last ${cfg.sinceMin} min)\n  sessions   ${cfg.remote ? `run in the sandbox via ${cfg.remote} (agent ${agentAlive() ? 'connected' : 'NOT running yet'})` : 'run on this machine'}\n  hooks      perm-wait=${cfg.permWait}s reply-window=${cfg.replyWindow}s`);
   startTailing();
   if (args.open) {
     const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';

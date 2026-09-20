@@ -264,7 +264,8 @@ dialog .r{display:flex;justify-content:flex-end;gap:8px}
 <dialog id="newDlg">
   <form method="dialog" id="newForm">
     <h3>New session</h3>
-    <label>Working directory<input id="nCwd" type="text" list="cwds" placeholder="~/projects/my-repo" required></label>
+    <div id="nWhere" class="sub"></div>
+    <label>Working directory<input id="nCwd" type="text" list="cwds" placeholder="~/projects/my-repo"></label>
     <datalist id="cwds"></datalist>
     <label>Pre-approved tools (optional)<input id="nAllow" type="text" placeholder="Read, Bash(git status), Edit"></label>
     <label>Prompt<textarea id="nPrompt" rows="4" placeholder="What should Claude work on?" required></textarea></label>
@@ -691,13 +692,16 @@ const dlg = $('#newDlg');
 $('#newBtn').onclick = () => {
   const last = [...st.sessions.values()].sort((a, b) => b.last - a.last)[0];
   if (!$('#nCwd').value && last?.cwd) $('#nCwd').value = last.cwd;
-  if (st.caps.remote) { $('#nCwd').required = false; $('#nCwd').placeholder = 'Directory inside the sandbox (blank = the agent\'s directory)'; if (!st.caps.agentAlive) toast('Sandbox agent is not running. Start it inside the sandbox: node agentscope.mjs agent --dir <shared dir>'); }
+  $('#nWhere').textContent = st.caps.remote ? (st.caps.agentAlive ? 'Runs inside the sandbox through the shared directory (agent connected).' : 'Runs inside the sandbox, but the agent is not running.') : 'Runs on this machine. To run inside the sandbox, start the dashboard with --remote <shared dir>.';
+  if (st.caps.remote) { $('#nCwd').placeholder = 'Directory inside the sandbox (blank = the agent\'s directory)'; if (!st.caps.agentAlive) toast('Sandbox agent is not running. Start it inside the sandbox: node agentscope.mjs agent --dir <shared dir>'); }
   if (st.caps.allowBypass && !$('#nMode option[value=bypassPermissions]')) $('#nMode').insertAdjacentHTML('beforeend', '<option value="bypassPermissions">Bypass all permissions (dangerous)</option>');
   dlg.showModal(); $('#nPrompt').focus();
 };
 $('#nCancel').onclick = () => dlg.close();
 $('#newForm').addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (!st.caps.remote && !$('#nCwd').value.trim()) return toast('Enter a working directory');
+  if (!$('#nPrompt').value.trim()) return toast('Enter a prompt');
   try {
     const r = await api('/api/sessions', { cwd: $('#nCwd').value, prompt: $('#nPrompt').value, model: $('#nModel').value.trim() || undefined, allow: $('#nAllow').value.trim() || undefined, permissionMode: $('#nMode').value });
     $('#nPrompt').value = ''; dlg.close(); select(r.sid, null);
