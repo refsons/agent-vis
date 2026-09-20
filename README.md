@@ -79,6 +79,12 @@ Sessions you start in your own terminal keep working as before, with the read-on
 | Tasks | Live TodoWrite lists per agent with progress |
 | Composer | Reply to any session, start new ones, stop or take over |
 
+**Layout.** Drag the edges of the Sessions and Needs-you panels, the agent column in the timeline, and the
+label gutter in Lanes to resize them; double-click a handle to reset. Sizes are remembered in the browser.
+Subagents read `<type> <description>` in full in the Sessions panel (the CLI's wording), and are shortened to
+`gp`, `exp`, `plan`, or the initials of hyphenated types (`code-reviewer` is `cr`) in Lanes and Timeline so
+more of the description fits. Hover for the full name.
+
 ## How it integrates with the CLI
 
 ```

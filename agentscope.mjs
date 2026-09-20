@@ -307,7 +307,7 @@ function pubSession(s) {
   };
 }
 const pubAgent = (a) => ({
-  key: a.key, sid: a.sid, id: a.id, parent: a.parent, label: a.label, kind: a.kind, status: a.status,
+  key: a.key, sid: a.sid, id: a.id, parent: a.parent, label: a.label, type: a.type, desc: a.desc, kind: a.kind, status: a.status,
   started: a.started, ended: a.ended, tools: a.tools, current: a.current, tokens: a.tokens,
 });
 const pubPrompt = (p) => ({
@@ -346,7 +346,7 @@ function getAgent(sess, e, ctx, ts) {
   let a = S.agents.get(key);
   if (a) return a;
   a = {
-    key, sid: sess.id, id, parent: null, label: id === 'main' ? 'main' : (metaLabel(ctx.file) || one(firstText(e), 48) || 'subagent'), kind: id === 'main' ? 'main' : 'sub', prompt: id === 'main' ? '' : firstText(e).slice(0, 400),
+    key, sid: sess.id, id, parent: null, label: id === 'main' ? 'main' : (metaParts(ctx.file)?.label || one(firstText(e), 48) || 'subagent'), type: '', desc: '', kind: id === 'main' ? 'main' : 'sub', prompt: id === 'main' ? '' : firstText(e).slice(0, 400),
     status: 'running', started: ts, ended: null, tools: 0, inflight: 0, current: null, tokens: 0, tid: null,
   };
   if (id !== 'main') linkAgent(sess, a, e);
@@ -355,17 +355,18 @@ function getAgent(sess, e, ctx, ts) {
   if (id !== 'main') emit({ sid: sess.id, aid: id, type: 'agent_start', ts, text: a.label, parent: a.parent });
   return a;
 }
-const taskLabel = (i = {}) => {
-  const nm = String(i.name || '').trim(), desc = String(i.description || '').trim(), type = i.subagent_type || 'agent';
-  return one(nm ? (desc ? `${nm}: ${desc}` : nm) : `${type}: ${desc || String(i.prompt || '').trim()}`, 90);
+/** Same wording as the CLI: "<agent type or name> <description>". Parts are kept so the UI can abbreviate the type. */
+const taskParts = (i = {}) => {
+  const type = String(i.name || i.subagent_type || 'agent').trim(), desc = one(i.description || i.prompt || '', 80);
+  return { type, desc, label: one(`${type} ${desc}`, 100) };
 };
 /** Newer CLIs write agent-<id>.meta.json next to a subagent transcript; use it when present. */
-function metaLabel(file) {
-  if (!file) return '';
+function metaParts(file) {
+  if (!file) return null;
   try {
     const m = JSON.parse(fs.readFileSync(file.replace(/\.jsonl$/, '.meta.json'), 'utf8'));
-    return taskLabel({ name: m.name, description: m.description, subagent_type: m.agentType || m.subagent_type });
-  } catch { return ''; }
+    return taskParts({ name: m.name, description: m.description, subagent_type: m.agentType || m.subagent_type });
+  } catch { return null; }
 }
 function firstText(e) {
   const c = e.message?.content;
@@ -380,18 +381,18 @@ function linkAgent(sess, a, e) {
     a.tid = a.id.slice(2);
     t = q.find((x) => x.tid === a.tid) || null;
     const live = S.tools.get(a.tid);
-    if (!t && live) t = { aid: live.aid, label: summarize(live.name, live.input) };
+    if (!t && live) t = { aid: live.aid, ...(isTask(live.name) ? taskParts(live.input) : { label: summarize(live.name, live.input) }) };
   } else {
     const txt = firstText(e).slice(0, 400);
     t = q.find((x) => !x.matched && txt && x.prompt === txt) || q.find((x) => !x.matched) || null;
     if (t) { t.matched = true; a.tid = t.tid; }
   }
   a.parent = t ? t.aid : 'main';
-  if (t) a.label = t.label;
+  if (t) { a.label = t.label; a.type = t.type || ''; a.desc = t.desc || ''; }
 }
 
 function applyTask(a, t) {
-  t.matched = true; a.tid = t.tid; a.parent = t.aid; a.label = t.label; markA(a);
+  t.matched = true; a.tid = t.tid; a.parent = t.aid; a.label = t.label; a.type = t.type || ''; a.desc = t.desc || ''; markA(a);
 }
 /** A subagent transcript can be read before the Task call that spawned it (mirrored or backfilled files). */
 function relinkPending(sess, t) {
@@ -512,7 +513,7 @@ function onToolUse(sess, ag, b, ts) {
   markA(ag);
   if (isTask(b.name)) {
     const q = S.taskQueue.get(sess.id) || [];
-    q.push({ tid: b.id, aid: ag.id, prompt: String(input.prompt || '').trim().slice(0, 400), label: taskLabel(input), matched: false });
+    q.push({ tid: b.id, aid: ag.id, prompt: String(input.prompt || '').trim().slice(0, 400), ...taskParts(input), matched: false });
     relinkPending(sess, q[q.length - 1]);
     if (q.length > 50) q.shift();
     S.taskQueue.set(sess.id, q);

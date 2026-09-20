@@ -52,7 +52,12 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word}
 #conn{font-size:12px;color:var(--faint)} #conn.ok{color:var(--ok)} #conn.bad{color:var(--err)}
 
 /* layout */
-#cols{flex:1;min-height:0;display:grid;grid-template-columns:300px minmax(0,1fr) 370px}
+#cols{flex:1;min-height:0;display:grid;grid-template-columns:var(--wl,300px) minmax(0,1fr) var(--wr,370px)}
+.pane,#center{position:relative}
+.grip{position:absolute;top:0;bottom:0;width:7px;cursor:col-resize;z-index:5;touch-action:none}
+.grip::after{content:'';position:absolute;top:0;bottom:0;left:3px;width:1px;background:transparent;transition:background .12s}
+.grip:hover::after,.grip.on::after{background:var(--work);width:2px;left:2px}
+#grip-l{right:-4px} #grip-r{left:-4px} #whoGrip{display:none}
 #cols>*{min-height:0;min-width:0}
 .pane{display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--panel)}
 #right{border-right:0;border-left:1px solid var(--line)}
@@ -95,7 +100,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word}
 #timeline{flex:1;overflow:auto;padding:6px 0 10px}
 .empty{padding:40px 28px;color:var(--dim);max-width:520px;line-height:1.6}
 .empty b{color:var(--ink)}
-.row{display:grid;grid-template-columns:62px 136px minmax(0,1fr);gap:0 10px;padding:4px 14px;align-items:start}
+.row{display:grid;grid-template-columns:62px var(--wwho,150px) minmax(0,1fr);gap:0 10px;padding:4px 14px;align-items:start}
 .row:hover{background:color-mix(in srgb,var(--raise) 55%,transparent)}
 .row.hl{background:color-mix(in srgb,var(--wait) 16%,transparent)}
 .row .ts{color:var(--faint);font-size:11.5px;font-variant-numeric:tabular-nums;padding-top:2px}
@@ -194,7 +199,7 @@ dialog .r{display:flex;justify-content:flex-end;gap:8px}
   #cols>*{display:none} body[data-tab=sessions] #sessions,body[data-tab=center] #center,body[data-tab=right] #right{display:flex}
   #tabbar{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--line);background:var(--panel);padding-bottom:env(safe-area-inset-bottom)}
   #tabbar button{border:0;border-radius:0;background:none;padding:12px 0;color:var(--dim)} #tabbar button.on{color:var(--ink);box-shadow:inset 0 2px 0 var(--work)}
-  .row{grid-template-columns:52px minmax(0,1fr)} .row .who{display:none}
+  .row{grid-template-columns:52px minmax(0,1fr)} .row .who{display:none} .grip{display:none!important}
   #summary,#bell,#conn{display:none} .pane{border:0} #top{padding:8px 12px}
 }
 </style>
@@ -213,6 +218,7 @@ dialog .r{display:flex;justify-content:flex-end;gap:8px}
   <aside id="sessions" class="pane">
     <div class="pane-h">Sessions <label><input type="checkbox" id="hideEnded" checked> Hide ended</label></div>
     <div id="sessList" class="scroll"></div>
+    <i class="grip" id="grip-l" title="Drag to resize, double-click to reset"></i>
   </aside>
 
   <section id="center">
@@ -230,6 +236,7 @@ dialog .r{display:flex;justify-content:flex-end;gap:8px}
       </div>
     </div>
     <div id="timeline" tabindex="0"></div>
+    <i class="grip" id="whoGrip" title="Drag to resize the agent column, double-click to reset"></i>
     <div id="lanes" hidden><div class="legend" id="legend"></div><svg id="lanesSvg" role="img" aria-label="Agent activity lanes"></svg></div>
     <form id="composer">
       <div class="r">
@@ -243,6 +250,7 @@ dialog .r{display:flex;justify-content:flex-end;gap:8px}
   </section>
 
   <aside id="right" class="pane">
+    <i class="grip" id="grip-r" title="Drag to resize, double-click to reset"></i>
     <div class="pane-h">Needs you <span class="badge" id="pendCount">0</span></div>
     <div class="scroll" id="inbox"></div>
     <div class="pane-h" style="border-top:1px solid var(--line)">Tasks</div>
@@ -357,14 +365,66 @@ function passes(it) {
   return true;
 }
 
+/* ───────── resizable panels ───────── */
+const LAYOUT_DEF = { wl: 300, wr: 370, wwho: 150, lbl: 200 };
+const layout = { ...LAYOUT_DEF };
+try { Object.assign(layout, JSON.parse(localStorage.getItem('agentscope.layout') || '{}')); } catch {}
+const clampN = (v, a, b) => Math.min(b, Math.max(a, v));
+function applyLayout() {
+  const r = document.documentElement.style;
+  r.setProperty('--wl', layout.wl + 'px'); r.setProperty('--wr', layout.wr + 'px'); r.setProperty('--wwho', layout.wwho + 'px');
+  placeWhoGrip();
+}
+function saveLayout() { try { localStorage.setItem('agentscope.layout', JSON.stringify(layout)); } catch {} }
+function placeWhoGrip() {
+  const g = $('#whoGrip'), t = $('#timeline'), c = $('#center');
+  if (!g || !t || !c) return;
+  const show = view === 'timeline' && !t.hidden;
+  g.style.display = show ? 'block' : 'none';
+  if (!show) return;
+  const cr = c.getBoundingClientRect(), tr = t.getBoundingClientRect();
+  g.style.top = (tr.top - cr.top) + 'px'; g.style.height = t.clientHeight + 'px';
+  g.style.left = (14 + 62 + 10 + layout.wwho + 5 - 3) + 'px';
+}
+function startDrag(e, key, calc, after) {
+  e.preventDefault();
+  const el = e.currentTarget, move = (ev) => { layout[key] = Math.round(calc(ev)); applyLayout(); after && after(); };
+  el && el.classList && el.classList.add('on');
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); el && el.classList && el.classList.remove('on'); saveLayout(); };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
+}
+const colsEl = $('#cols');
+$('#grip-l').addEventListener('pointerdown', (e) => startDrag(e, 'wl', (ev) => clampN(ev.clientX - colsEl.getBoundingClientRect().left, 200, 640)));
+$('#grip-r').addEventListener('pointerdown', (e) => startDrag(e, 'wr', (ev) => clampN(colsEl.getBoundingClientRect().right - ev.clientX, 260, 720)));
+$('#whoGrip').addEventListener('pointerdown', (e) => startDrag(e, 'wwho', (ev) => clampN(ev.clientX - $('#center').getBoundingClientRect().left - 14 - 62 - 10, 70, 520)));
+for (const [id, key] of [['#grip-l', 'wl'], ['#grip-r', 'wr'], ['#whoGrip', 'wwho']]) $(id).addEventListener('dblclick', () => { layout[key] = LAYOUT_DEF[key]; applyLayout(); saveLayout(); });
+$('#lanesSvg').addEventListener('pointerdown', (e) => {
+  if (!e.target.closest('.grip-lbl')) return;
+  e.preventDefault();
+  const move = (ev) => { layout.lbl = Math.round(clampN(ev.clientX - $('#lanesSvg').getBoundingClientRect().left, 110, 640)); dirty.lanes = true; schedule(); };
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); saveLayout(); };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
+});
+$('#lanesSvg').addEventListener('dblclick', (e) => { if (e.target.closest('.grip-lbl')) { layout.lbl = LAYOUT_DEF.lbl; saveLayout(); dirty.lanes = true; schedule(); } });
+addEventListener('resize', placeWhoGrip);
+
 /* ───────── timeline rendering ───────── */
 const tl = $('#timeline');
 const agentOf = (it) => st.agents.get(it.sid + '/' + it.aid);
+/* Compact agent name for lanes and timeline: abbreviated type + description. The full name stays in the sessions panel and tooltips. */
+const TYPE_ABBR = { 'general-purpose': 'gp', explore: 'exp', plan: 'plan', 'statusline-setup': 'sl', 'output-style-setup': 'os' };
+function abbr(t) {
+  const k = String(t).toLowerCase();
+  if (TYPE_ABBR[k]) return TYPE_ABBR[k];
+  const parts = k.split(/[-_\s]+/).filter(Boolean);
+  return parts.length > 1 ? parts.map((x) => x[0]).join('') : k.slice(0, 4);
+}
+const short = (a) => (!a ? '' : a.kind === 'sub' && a.type ? (abbr(a.type) + ' ' + (a.desc || '')).trim() : a.label);
 function who(it) {
   const a = agentOf(it), s = st.sessions.get(it.sid);
-  const label = a ? a.label : it.aid;
+  const label = a ? short(a) : it.aid, full = a ? a.label : it.aid;
   const pre = !sel.sid && s ? (s.title ? s.title.slice(0, 12) + ': ' : '') : '';
-  return `<div class="who" title="${esc(pre + label)}"><i style="background:${acolor(it.sid + '/' + it.aid)}"></i><span>${esc(pre + label)}</span></div>`;
+  return `<div class="who" title="${esc(pre + full)}"><i style="background:${acolor(it.sid + '/' + it.aid)}"></i><span>${esc(pre + label)}</span></div>`;
 }
 function rowFor(it) {
   const r = document.createElement('div');
@@ -650,7 +710,7 @@ let laneBars = [];
 const CATS = [['read', 'Read and search'], ['write', 'Edit and write'], ['exec', 'Shell'], ['agent', 'Subagent'], ['web', 'Web'], ['mcp', 'MCP tools'], ['plan', 'Planning'], ['other', 'Other']];
 function drawLanes() {
   const svg = $('#lanesSvg'), W = Math.max(600, $('#lanes').clientWidth);
-  const LBL = 200, PAD = 16, RH = 32, AX = 24, win = +$('#win').value * 60000, t1 = Date.now(), t0 = t1 - win;
+  const LBL = layout.lbl, PAD = 16, RH = 32, AX = 24, win = +$('#win').value * 60000, t1 = Date.now(), t0 = t1 - win;
   const X = (t) => LBL + (Math.min(Math.max(t, t0), t1) - t0) / win * (W - LBL - PAD);
   const recent = st.items.filter((it) => it.ts >= t0 - 600000 && (!sel.sid || it.sid === sel.sid));
   const active = new Set(recent.map((it) => it.sid + '/' + it.aid));
@@ -668,8 +728,8 @@ function drawLanes() {
     const end = a.ended || t1, bx = X(a.started), bw = Math.max(0, X(end) - bx);
     out += `<line class="grid" x1="${LBL - 8}" x2="${W - PAD}" y1="${y + RH}" y2="${y + RH}"/>`;
     if (bw > 0) out += `<rect class="band" x="${bx}" y="${y + 4}" width="${bw}" height="${RH - 8}" rx="4" opacity=".55"/>`;
-    const lab = (!sel.sid && s ? (s.title || base(s.cwd)).slice(0, 14) + ' / ' : '') + a.label;
-    out += `<g class="lane-hit" data-lane="${esc(a.sid)}|${esc(a.id)}"><rect x="0" y="${y}" width="${LBL - 10}" height="${RH}" fill="transparent"/><rect x="8" y="${y + RH / 2 - 4}" width="8" height="8" rx="2" fill="${acolor(a.key)}"/><text class="lane-l" x="24" y="${y + RH / 2 + 4}">${esc(lab.length > 26 ? lab.slice(0, 25) + '…' : lab)}</text></g>`;
+    const lab = (!sel.sid && s ? (s.title || base(s.cwd)).slice(0, 14) + ' / ' : '') + short(a), maxc = Math.max(6, Math.floor((LBL - 34) / 6.4));
+    out += `<g class="lane-hit" data-lane="${esc(a.sid)}|${esc(a.id)}"><rect x="0" y="${y}" width="${LBL - 10}" height="${RH}" fill="transparent"/><rect x="8" y="${y + RH / 2 - 4}" width="8" height="8" rx="2" fill="${acolor(a.key)}"/><text class="lane-l" x="24" y="${y + RH / 2 + 4}">${esc(lab.length > maxc ? lab.slice(0, maxc - 1) + '…' : lab)}</text><title>${esc((s && !sel.sid ? (s.title || base(s.cwd)) + ' / ' : '') + a.label)}</title></g>`;
   });
   for (const it of recent) {
     const li = idx.get(it.sid + '/' + it.aid); if (li === undefined) continue;
@@ -687,6 +747,7 @@ function drawLanes() {
       out += `<path class="bar" data-i="${n}" d="M${x - 5} ${y + RH - 5} l5 -${RH - 12} l5 ${RH - 12} z" fill="var(--info)"/>`;
     }
   }
+  out += `<line x1="${LBL - 5}" x2="${LBL - 5}" y1="0" y2="${H}" stroke="var(--line2)"/><rect class="grip-lbl" x="${LBL - 10}" y="0" width="10" height="${H}" fill="transparent" style="cursor:col-resize"><title>Drag to resize, double-click to reset</title></rect>`;
   const nx = X(t1); out += `<line class="now" x1="${nx}" x2="${nx}" y1="${AX - 4}" y2="${H - 8}"/>`;
   if (!lanes.length) out += `<text x="${LBL}" y="${AX + 28}">No agent activity in this window.</text>`, H = AX + 60;
   svg.setAttribute('width', W); svg.setAttribute('height', H); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.innerHTML = out;
@@ -716,7 +777,7 @@ function setView(v) {
   $('#timeline').hidden = v !== 'timeline'; $('#lanes').hidden = v !== 'lanes';
   $('#tlFilters').hidden = v !== 'timeline'; $('#laneCtl').hidden = v !== 'lanes';
   if (v === 'timeline') needFull = true; else dirty.lanes = true;
-  schedule();
+  placeWhoGrip(); schedule();
 }
 document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => setView(b.dataset.view)));
 $('#win').onchange = () => { dirty.lanes = true; schedule(); };
@@ -772,6 +833,8 @@ function connect() {
   es.addEventListener('pending', (m) => { const p = JSON.parse(m.data); if (!st.pending.has(p.id)) alertNew(p); st.pending.set(p.id, p); dirty.inbox = true; schedule(); });
   es.addEventListener('pending_remove', (m) => { st.pending.delete(JSON.parse(m.data).id); dirty.inbox = true; schedule(); });
 }
+applyLayout();
+new ResizeObserver(placeWhoGrip).observe($('#timeline'));
 connect();
 </script>
 </body>
